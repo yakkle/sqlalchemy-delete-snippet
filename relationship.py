@@ -5,11 +5,11 @@ https://github.com/sqlalchemy/sqlalchemy/discussions/10934
 
 import asyncio
 from loguru import logger
-from sqlalchemy import Integer, ForeignKey, Column, String, event
+from sqlalchemy import Integer, ForeignKey, Column, String, event, select
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, sessionmaker
+from sqlalchemy.orm import relationship, sessionmaker, lazyload
 
 Base = declarative_base()
 
@@ -30,22 +30,33 @@ class Widget(Base):
     widget_id = Column(Integer, primary_key=True)
     favorite_entry_id = Column(
         # Integer, ForeignKey("entry.entry_id", name="fk_favorite_entry")
-        Integer, ForeignKey("entry.entry_id", name="fk_favorite_entry", ondelete="SET NULL")
+        Integer,
+        ForeignKey("entry.entry_id", name="fk_favorite_entry", ondelete="SET NULL"),
     )
     name = Column(String(50))
 
     # entries = relationship(
     #     Entry, primaryjoin=widget_id == Entry.widget_id, lazy="selectin")
     entries = relationship(
-        Entry, cascade="all", foreign_keys=[Entry.widget_id], back_populates="widget", lazy="selectin")
+        Entry,
+        cascade="all",
+        foreign_keys=[Entry.widget_id],
+        back_populates="widget",
+        lazy="dynamic",
+        # lazy="selectin",
+    )
 
     favorite_entry = relationship(
-            Entry, primaryjoin=favorite_entry_id == Entry.entry_id, foreign_keys=favorite_entry_id, post_update=True
-        )
+        Entry,
+        primaryjoin=favorite_entry_id == Entry.entry_id,
+        foreign_keys=favorite_entry_id,
+        post_update=True,
+    )
 
 
 async def async_main():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=True, future=True)
+
     @event.listens_for(engine.sync_engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
@@ -55,7 +66,14 @@ async def async_main():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    Session = sessionmaker(bind=engine, class_=AsyncSession, future=True, autocommit=False, autoflush=False, expire_on_commit=False)
+    Session = sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        future=True,
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+    )
     # Session = sessionmaker(bind=engine, class_=AsyncSession, future=True)
     db = Session()
 
@@ -79,7 +97,9 @@ async def async_main():
     await db.refresh(w1)
 
     logger.debug(f"{w1.favorite_entry_id=}")
-    logger.debug(f"{w1.entries=}")
+    # logger.debug(f"{w1.entries=}")
+    entries = (await db.scalars(w1.entries.statement)).all()
+    logger.debug(f"{entries=}")
 
     e2 = Entry(widget_id=w1.widget_id, name="2 someentry")
     # db.add_all([w1, e2])
@@ -98,10 +118,21 @@ async def async_main():
     # await db.commit()
 
     await db.refresh(w1)
-    logger.debug(f"{w1.entries=}")
-    entries = w1.entries
+    # logger.debug(f"{w1.entries=}")
+    # entries = w1.entries
+    entries = (await db.scalars(w1.entries.statement)).all()
     for entry in entries:
         logger.debug(f"{entry.name=}")
+
+    # result = await db.execute(select(Widget).where(Widget.widget_id == w1.widget_id))
+    result = await db.execute(
+        select(Widget)
+        .options(lazyload(Widget.entries))
+        .where(Widget.widget_id == w1.widget_id)
+    )
+    select_w = result.scalar_one_or_none()
+    entries = (await db.scalars(select_w.entries.statement)).all()
+    logger.warning(f"{entries=}")
 
     delete_entry = w1.favorite_entry
     # w1.favorite_entry = None
